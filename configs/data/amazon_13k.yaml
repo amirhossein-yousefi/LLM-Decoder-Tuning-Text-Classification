@@ -1,0 +1,20 @@
+data:
+  dataset_name: "amazon_13k"
+  id_column: "uid"
+  text_fields:
+  target_text_column: "text"
+  max_length: 1024
+  train_csv: "llm_cls/data/train_top10.csv"
+  val_csv: "llm_cls/data/validation_top10.csv"
+  test_csv: "llm_cls/data/test_top10.csv"
+  label_columns:
+    - "books"
+    - "movies_tv"
+    - "music"
+    - "pop"
+    - "literature_fiction"
+    - "movies"
+    - "education_reference"
+    - "rock"
+    - "used_rental_textbooks"
+    - "new"

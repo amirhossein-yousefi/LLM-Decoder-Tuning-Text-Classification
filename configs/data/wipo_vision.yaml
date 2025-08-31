@@ -1,0 +1,10 @@
+data:
+  dataset_name: "WIPO"
+  id_column: "Publication Number"
+  text_fields: ["title", "fclaim", "abstract"]
+  target_text_column: "text"
+  max_length: 1024
+  train_csv: "data/train.csv"
+  val_csv: "data/validation.csv"
+  test_csv: "data/test.csv"
+  label_columns:

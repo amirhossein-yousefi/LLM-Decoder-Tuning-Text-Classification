@@ -1,0 +1,49 @@
+data:
+  dataset_name: "amazon_13k"
+  id_column: "uid"
+  text_fields:
+  target_text_column: "text"
+  max_length: 1024
+  train_csv: "llm_cls/data/train_top10.csv"
+  val_csv: "llm_cls/data/validation_top10.csv"
+  test_csv: "llm_cls/data/test_top10.csv"
+  label_columns:
+    - "books"
+    - "movies_tv"
+    - "music"
+    - "pop"
+    - "literature_fiction"
+    - "movies"
+    - "education_reference"
+    - "rock"
+    - "used_rental_textbooks"
+    - "new"
+
+
+model:
+  model_name: "meta-llama/Llama-3.2-1B"
+  hf_token: null         # or set HF_TOKEN env var
+  problem_type: "multi_label_classification"
+  use_4bit: true
+  torch_dtype: "bfloat16"
+  lora_r: 2
+  lora_alpha: 2
+  lora_dropout: 0.05
+  lora_target_modules: ["q_proj","k_proj","v_proj","o_proj","gate_proj","down_proj","up_proj"]
+
+train:
+  batch_size: 4
+  num_train_epochs: 20
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  gradient_accumulation_steps: 8
+  early_stopping_patience: 2
+  metric_for_best_model: "f1_micro"
+  save_total_limit: 1
+  optim_8bit_when_4bit: true
+  report_to: ['tensorboard']  # e.g., ["wandb"]
+
+exp:
+  output_root: "outputs"
+  seeds: [1, 3, 4, 5]
+  run_name: null
