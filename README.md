@@ -58,7 +58,13 @@ Encoder models dominate text classification, but decoder‑only LLMs can be stro
 ├── requirements.txt  # Core dependencies
 ├── pyproject.toml    # Build & project metadata
 ├── Makefile          # Common developer tasks
-└── README.md
+├─  README.md
+├─ sagemaker/
+│  ├─ train_entry.py          # wraps your CLI, then exports a HF model to SM_MODEL_DIR
+│  ├─ inference.py            # SageMaker handler: model_fn / input_fn / predict_fn / output_fn
+│  ├─ requirements.txt        # extras (peft, bitsandbytes if needed)
+│  ├─ launch_training.py      # starts a SageMaker training job (HuggingFace Estimator)
+│  └─ deploy_endpoint.py      # creates a real-time endpoint and returns a Predictor
 ```
 
 ---
@@ -230,6 +236,213 @@ python -m llm_cls.cli predict \  --config configs/default.yaml \  --input_csv da
 > - To try a non‑decoder baseline (e.g., `anferico/bert-for-patents`), set `model.model_name` and `use_4bit=false`.
 
 ---
+
+
+## SageMaker Integration for `LLM-Decoder-Tuning-Text-Classification`
+
+This guide documents the **Amazon SageMaker** training & inference workflow added under the `sagemaker/` folder. It lets you:
+
+- **Train** your existing project on SageMaker using the Hugging Face Deep Learning Containers (DLCs).
+- **Export** a `save_pretrained/` model into `SM_MODEL_DIR` so SageMaker can package it as `model.tar.gz`.
+- **Deploy** a real‑time endpoint with a robust, multi‑label‑friendly inference handler.
+
+> The integration is **non‑intrusive**: it wraps your current CLI (`python -m llm_cls.cli ...`) and does not change your training logic.
+
+
+## Folder layout
+
+```
+sagemaker/
+├─ train_entry.py          # wraps your CLI then exports a HF model to SM_MODEL_DIR
+├─ inference.py            # model_fn / input_fn / predict_fn / output_fn (JSON in/out)
+├─ requirements.txt        # extras for training/serving (peft, bitsandbytes)
+├─ launch_training.py      # starts a SageMaker training job (HuggingFace Estimator)
+└─ deploy_endpoint.py      # creates a real-time endpoint (HuggingFaceModel)
+```
+
+- **`train_entry.py`** calls your existing training command (see your root README), then finds the latest HF-style checkpoint under `outputs/` and saves a complete `save_pretrained` model and tokenizer into `SM_MODEL_DIR` (usually `/opt/ml/model`).  
+- **LoRA/QLoRA:** If training produced **adapters** only, set `BASE_MODEL` so `train_entry.py` can merge adapters into base weights before export.  
+- **`inference.py`** implements the standard SageMaker handler contract and returns **JSON**. It supports batched inputs, multi‑label with configurable thresholds, and GPU/CPU.
+
+
+## Prerequisites
+
+- **AWS** account + **IAM role** with permissions for SageMaker, S3, and CloudWatch (export ARN as `SM_EXECUTION_ROLE_ARN`).  
+- **Data in S3** (CSV files). Example S3 layout:
+  - `s3://<bucket>/<prefix>/data/train/train.csv`
+  - `s3://<bucket>/<prefix>/data/validation/validation.csv`
+- **Optional:** `HF_TOKEN` in the environment if you use gated models on the Hugging Face Hub.
+
+
+## Configure your dataset paths (important)
+
+SageMaker maps `Estimator.fit(inputs={"train": ..., "validation": ...})` to **channel directories** like:
+
+```
+/opt/ml/input/data/train/       # SM_CHANNEL_TRAIN
+/opt/ml/input/data/validation/  # SM_CHANNEL_VALIDATION
+```
+
+Update your **config YAML** to point at those files *inside the container*. For example (adapt to your schema):
+
+```yaml
+# Example only — adjust keys to match your config
+data:
+  train_csv: /opt/ml/input/data/train/train.csv
+  validation_csv: /opt/ml/input/data/validation/validation.csv
+  # test_csv: /opt/ml/input/data/test/test.csv
+```
+
+> Tip: If your config supports `${env:VAR}` interpolation, you can use `${env:SM_CHANNEL_TRAIN}/train.csv` and `${env:SM_CHANNEL_VALIDATION}/validation.csv`.
+
+
+## Quick start
+
+### 1) Launch training
+
+From the repo root (after adding this `sagemaker/` folder):
+
+```bash
+# Required: your SageMaker execution role
+export SM_EXECUTION_ROLE_ARN="arn:aws:iam::<account>:role/<YourSageMakerRole>"
+
+# Optional: pick a bucket/prefix for artifacts + data channels (defaults are fine)
+export SM_BUCKET="<your-bucket>"              # defaults to session.default_bucket()
+export SM_PREFIX="llm-decoder-cls"            # folder prefix
+
+# Optional: S3 locations for data channels (if you used different keys)
+export SM_TRAIN_S3="s3://$SM_BUCKET/$SM_PREFIX/data/train/"
+export SM_VAL_S3="s3://$SM_BUCKET/$SM_PREFIX/data/validation/"
+
+# Optional: DLC versions (check the HF DLC matrix for valid combos)
+export TRANSFORMERS_VERSION="4.41"            # example
+export PYTORCH_VERSION="2.3"
+export PY_VERSION="py311"
+
+# Optional: instance sizing
+export SM_TRAIN_INSTANCE="ml.g5.2xlarge"
+export SM_TRAIN_INSTANCE_COUNT=1
+
+# Which config file under configs/ to pass to your CLI
+export CONFIG_KEY="default.yaml"
+
+# Only if training produced LoRA adapters that need merging
+# export BASE_MODEL="meta-llama/Llama-3.1-8B"
+
+python sagemaker/launch_training.py
+```
+
+When training finishes, the script prints the S3 URI for your model artifact (a `model.tar.gz`). Save it; you’ll need it to deploy.
+
+
+### 2) Deploy a real‑time endpoint
+
+```bash
+# Use the S3 path printed at the end of training:
+export SM_TRAINED_MODEL_S3="s3://<bucket>/<prefix>/output/<job-id>/output/model.tar.gz"
+
+# Inference runtime toggles (all optional)
+export MULTILABEL="true"
+export MULTILABEL_THRESHOLD="0.5"
+export MAX_LENGTH="512"
+export BATCH_SIZE="16"
+# export HF_TOKEN="..."    # if needed for gated models
+
+# Instance sizing
+export SM_INF_INSTANCE="ml.g5.xlarge"
+export SM_INF_INSTANCE_COUNT=1
+
+# Endpoint name (optional)
+export SM_ENDPOINT_NAME="llm-decoder-cls-endpoint"
+
+python sagemaker/deploy_endpoint.py
+```
+
+The script prints your **endpoint name**.
+
+
+### 3) Invoke the endpoint
+
+Use the Python SDK’s `Predictor`. Because the handler expects **JSON**, set the serializer & deserializer:
+
+```python
+from sagemaker.predictor import Predictor
+from sagemaker.serializers import JSONSerializer
+from sagemaker.deserializers import JSONDeserializer
+
+endpoint_name = "llm-decoder-cls-endpoint"  # or whatever was printed
+p = Predictor(endpoint_name, serializer=JSONSerializer(), deserializer=JSONDeserializer())
+
+p.predict({"text": ["great product!", "terrible support"]})
+# → [[{"label": "POSITIVE", "score": 0.98}], [{"label": "NEGATIVE", "score": 0.97}]]
+```
+
+The handler also supports a single string or a raw list of strings as input.
+
+
+## How it works under the hood
+
+- **Training** uses the `HuggingFace` Estimator in the SageMaker Python SDK. Your repository is sent as `source_dir`, `sagemaker/train_entry.py` is the `entry_point`, and S3 inputs are mounted under **channels** (e.g., `/opt/ml/input/data/train/`).  
+- `train_entry.py` runs your **existing CLI**:  
+  `python -m llm_cls.cli train --config /opt/ml/code/configs/<CONFIG_KEY>`  
+  Then it locates the most recent HF‑style checkpoint under `outputs/` and **exports** a `save_pretrained` model to `SM_MODEL_DIR` so SageMaker can package it as `model.tar.gz` for deployment.
+- **Serving** uses `HuggingFaceModel(...).deploy(...)` and your custom `inference.py` implementing `model_fn`, `input_fn`, `predict_fn`, and `output_fn`.  
+  - JSON shape: `{"text": "..."} | {"text": ["...","..."]} | ["...","..."]`.  
+  - Multi‑label mode applies a sigmoid and threshold per class; otherwise softmax.  
+  - LoRA adapters are detected and merged when possible.
+
+
+## Choose compatible DLC versions
+
+Set `TRANSFORMERS_VERSION`, `PYTORCH_VERSION`, and `PY_VERSION` in the environment to match **supported** Hugging Face DLC tags for your region. See the “Available DLCs” matrix and pick a trio that exists in your AWS region.
+
+
+## Common customizations
+
+- **Different data layouts** — Add more channels in `launch_training.py` and reference them from your config (e.g., `test`, `aux`).  
+- **Larger batch sizes** — Increase `BATCH_SIZE` for inference.  
+- **Thresholding** — Adjust `MULTILABEL_THRESHOLD` per your validation metrics.  
+- **Gated models** — Export `HF_TOKEN` to allow the DLC to pull private/gated models.  
+- **No custom handler** — If you don’t need post‑processing, you can deploy “zero‑code” by setting `HF_TASK="text-classification"` and omitting `entry_point` (not used by these scripts).
+
+
+## Troubleshooting
+
+- **“File not found: /opt/ml/input/data/train/train.csv”** — Ensure your S3 path is correct and that `launch_training.py` passes an `"inputs"` dict with a `"train"` key.  
+- **“No model found to export”** — Confirm your training wrote an HF model directory containing `config.json` somewhere under `outputs/`.  
+- **Adapter‑only checkpoints** — Provide `BASE_MODEL` so the export step can merge adapters.  
+- **Serialization errors when invoking** — Make sure you used `JSONSerializer()`/`JSONDeserializer()` with `Predictor`.  
+- **Version mismatches** — Align `transformers_version`, `pytorch_version`, and `py_version` to a valid DLC trio.
+
+
+## Cost & cleanup
+
+SageMaker **real‑time endpoints accrue charges while running**. After testing, delete the endpoint (and optionally the model & endpoint config) to stop billing. You can safely keep the `model.tar.gz` in S3.
+
+
+## Security
+
+Keep tokens and secrets (e.g., `HF_TOKEN`) in **environment variables** or a secrets manager. Do **not** commit secrets to the repository.
+
+
+---
+
+### At a glance: environment variables used by these scripts
+
+| Variable | Purpose |
+|---|---|
+| `SM_EXECUTION_ROLE_ARN` | IAM role used by SageMaker (required). |
+| `SM_BUCKET`, `SM_PREFIX` | Optional S3 bucket/prefix for artifacts. |
+| `SM_TRAIN_S3`, `SM_VAL_S3` | S3 URIs for data channels. |
+| `CONFIG_KEY` | Which file under `configs/` to pass to your CLI. |
+| `BASE_MODEL` | Base HF model id used to merge LoRA adapters (optional). |
+| `TRANSFORMERS_VERSION`, `PYTORCH_VERSION`, `PY_VERSION` | DLC versions. |
+| `SM_TRAIN_INSTANCE(_COUNT)` | Training instance type & count. |
+| `SM_INF_INSTANCE(_COUNT)` | Inference instance type & count. |
+| `SM_ENDPOINT_NAME` | Name of the endpoint to create. |
+| `HF_TOKEN` | Optional access token for gated Hub models. |
+| `MULTILABEL`, `MULTILABEL_THRESHOLD`, `MAX_LENGTH`, `BATCH_SIZE` | Inference behavior toggles. |
+
 
 ## Practical guidance
 
