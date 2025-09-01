@@ -13,7 +13,6 @@ _Modular, memory‑efficient fine‑tuning of decoder‑only LLMs (LoRA + option
 ## 🚀 Model on Hugging Face
 
 [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-LLM--Tuning--Text--Classification-yellow.svg)](https://huggingface.co/Amirhossein75/LLM-Decoder-Tuning-Text-Classification)
-LLM-Decoder-Tuning-Text-Classification
 <p align="center">
   <a href="https://huggingface.co/Amirhossein75/LLM-Decoder-Tuning-Text-Classification">
     <img src="https://img.shields.io/badge/🤗%20View%20on%20Hugging%20Face-blueviolet?style=for-the-badge" alt="Hugging Face Repo">
